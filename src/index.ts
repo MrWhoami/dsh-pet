@@ -356,7 +356,7 @@ function servedRow(ctx: Context): ServedSettingsRow | undefined {
 }
 
 /** Register the pet service and its API + asset routes on the context. */
-export const apply = mountOnce('@linxin666/dsh-pet', applyImpl)
+export const apply = mountOnce('@mrwhoami/dsh-pet', applyImpl)
 
 /** Plugin config: the tuning block a profile may declare plus the pet's settings fields. */
 export type PetPluginConfig = Omit<PetConfig, 'enabled' | 'decorationEnabled'> & PetFormConfig
