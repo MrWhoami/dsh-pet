@@ -38,6 +38,9 @@ vi.mock('@deepseek-ai/dsh-client-store', () => ({
     },
   }),
 }))
+import { defaultPetRendererRegistry } from './renderers/registry.ts'
+import { frames2dRenderer } from './renderers/frames2d.ts'
+import { PetDockEntry } from './PetDockEntry.tsx'
 import { GameplayHud, type GameplayApi, type GameplayBus } from './gameplay-hud.tsx'
 import { createPetStore, type PetStoreInstance } from './pet-store.ts'
 import { createDragStream } from './drag-stream.ts'
@@ -162,7 +165,25 @@ describe('GameplayHud', () => {
   })
   afterEach(() => {
     cleanup()
+    defaultPetRendererRegistry.clear()
     vi.useRealTimers()
+  })
+
+  it('keeps gameplay mounted and working when the desktop reports ready', async () => {
+    defaultPetRendererRegistry.register(frames2dRenderer)
+    const store = createPetStore().create()
+    store.actions.setPets([petDefinition()])
+    store.actions.setSnapshot({ ...snapshot(gameplayView({ mode: 'work' })), desktopOverlayRunning: true })
+    const workTick = vi.fn(async () => ({ ok: true }))
+    const noop = vi.fn()
+    render(<PetDockEntry store={store} t={t} ensure={noop} pet={noop} feed={noop}
+      hide={noop} summon={noop} dragEnd={noop} rename={noop} panelAction={noop}
+      openSession={noop} feedbackDone={noop}
+      gameplay={{ workTick, touch: noop, setMode: noop, buy: noop, setSkin: noop }} />)
+    expect(screen.queryByTestId('pet-desktop-overlay')).toBeNull()
+    expect(screen.getByTestId('pet-dock')).toBeTruthy()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(workTick).toHaveBeenCalledTimes(1)
   })
 
   it('user sees the pet roam on its interval and hold the walk track', () => {

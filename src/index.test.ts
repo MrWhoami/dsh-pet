@@ -71,6 +71,8 @@ describe('pet configuration schema', () => {
       enabled: true,
       decorationEnabled: true,
       statusBubbles: true,
+      desktopOverlay: true,
+      desktopOverlayCommand: false,
     })
   })
 })

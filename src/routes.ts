@@ -22,6 +22,7 @@ import type { PetService } from './service.ts'
 import type { PetInteraction } from './affinity.ts'
 import { DECORATION_ASSET_PREFIX, petEntryView, petPackageRoot, type PetEntry, type PetRegistry } from './registry.ts'
 import { isPetAllowed } from './access.ts'
+import { isLoopbackRequest } from './loopback.ts'
 import { dshHome } from './dsh-home.ts'
 import { readJsonBody, writeJson } from './http.ts'
 
@@ -146,10 +147,10 @@ function getRoute(ctx: Context, path: string, run: (req: IncomingMessage) => Pro
   return {
     kind: 'exact',
     path,
-    handler: (req: IncomingMessage, res: ServerResponse): void => {
-      if (!guard(ctx, req, res)) return
-      if (!requireMethod(req, res, 'GET')) return
-      run(req).then((value) => writeJson(res, 200, value), (error) => {
+    handler: (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      if (!guard(ctx, req, res)) return Promise.resolve()
+      if (!requireMethod(req, res, 'GET')) return Promise.resolve()
+      return run(req).then((value) => writeJson(res, 200, value), (error) => {
         writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
       })
     },
@@ -157,13 +158,17 @@ function getRoute(ctx: Context, path: string, run: (req: IncomingMessage) => Pro
 }
 
 /** Wrap one async service call as a POST JSON route (body passed through). */
-function postRoute(ctx: Context, path: string, run: (body: Record<string, unknown>) => Promise<unknown>): WebRoute {
+function postRoute(ctx: Context, path: string, run: (body: Record<string, unknown>, req: IncomingMessage) => Promise<unknown>, localOnly = false): WebRoute {
   return {
     kind: 'exact',
     path,
     handler: (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       if (!guard(ctx, req, res)) return Promise.resolve()
       if (!requireMethod(req, res, 'POST')) return Promise.resolve()
+      if (localOnly && !isLoopbackRequest(req)) {
+        writeJson(res, 403, { ok: false, error: 'loopback-required' })
+        return Promise.resolve()
+      }
       // Shared lenient reader (64 KiB cap): an empty body yields null and is
       // restored to {} at the call site (legacy empty-body semantics); invalid
       // JSON and over-limit bodies also yield null, so the endpoint validators
@@ -171,7 +176,7 @@ function postRoute(ctx: Context, path: string, run: (body: Record<string, unknow
       return readJsonBody(req, { maxBytes: 64 * 1024 }).then((parsed) => {
         const payload = parsed ?? {}
         const record = (typeof payload === 'object' && payload !== null) ? payload as Record<string, unknown> : {}
-        return run(record).then(
+        return run(record, req).then(
           (value) => writeJson(res, 200, value),
           (error) => {
             writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
@@ -571,16 +576,97 @@ function decorationHandler(ctx: Context, registry: PetRegistry, caps: PetAssetCa
 }
 
 /** Build the full route family (API + assets + runtime) for one service. */
-export function makePetRoutes(deps: { service: PetService; ctx: Context; assetCaps?: PetAssetCaps } & PetRuntimeRoots): WebRoute[] {
+export function makePetRoutes(deps: {
+  service: PetService
+  ctx: Context
+  assetCaps?: PetAssetCaps
+  /** Liveness of the opt-in desktop companion window. */
+  overlayStatus?: () => unknown
+  /** Called by the companion once it has loaded and displayed its first frame. */
+  overlayReady?: () => void
+} & PetRuntimeRoots): WebRoute[] {
   const { service, ctx } = deps
+  // Only the most recently focused local page owns the desktop session selection.
+  // Event-time revisions also reject requests from a previous UI lifetime.
+  let titleOwner: { source: string; revision: number; focusedAt: number } | undefined
+  const titleRevisions = new Map<string, number>()
   const apiRoutes: WebRoute[] = [
-    getRoute(ctx, PET_API_PREFIX + '/state', (req) => {
+    // Desktop companion liveness. The program path is deliberately not part
+    // of this view: the route also answers a paired remote device.
+    getRoute(ctx, PET_API_PREFIX + '/overlay', async () => deps.overlayStatus?.() ?? { supported: false, running: false, ready: false, dismissed: false }),
+    // The companion reports readiness after it has decoded the atlas and put
+    // the first frame on screen. The host only hides the page pet after this,
+    // so a broken or still-starting companion cannot leave the user petless.
+    postRoute(ctx, PET_API_PREFIX + '/overlay/ready', async () => {
+      deps.overlayReady?.()
+      return { ok: true }
+    }, true),
+    getRoute(ctx, PET_API_PREFIX + '/state', async (req) => {
       // The browser half reports the GUI's current session id so the bubble
       // stack can lead with the session the user is actually looking at.
-      const current = new URL(req.url ?? '/', 'http://pet.local').searchParams.get('current')
-      return service.state(current === null || current === '' ? undefined : current)
+      const query = new URL(req.url ?? '/', 'http://pet.local').searchParams
+      const local = isLoopbackRequest(req)
+      const current = local && query.get('desktop') === '1' ? service.desktopSessionId : query.get('current')
+      const state = await service.state(current === null || current === '' ? undefined : current)
+      if (!local && query.get('surface') !== 'desktop') delete state.desktopOverlayRunning
+      return state
     }),
     getRoute(ctx, PET_API_PREFIX + '/pets', () => service.pets()),
+    // The browser half owns the GUI session list; the desktop companion does
+    // not. Accept a bounded title snapshot so both surfaces can show the
+    // session/project title above the bubble body.
+    postRoute(ctx, PET_API_PREFIX + '/session-titles', (body, req) => {
+      const local = isLoopbackRequest(req)
+      const versioned = typeof body.source === 'string' && body.source.length <= 128
+        && typeof body.revision === 'number' && Number.isFinite(body.revision) && body.revision > 0
+        && typeof body.focusedAt === 'number' && Number.isFinite(body.focusedAt)
+        && body.focusedAt >= 0 && body.focusedAt <= (body.revision as number)
+      if (versioned) {
+        // Remote clients share ordering protection, but never desktop ownership.
+        const key = (local ? 'local:' : 'remote:') + body.source
+        const revision = body.revision as number
+        if (local && titleOwner !== undefined && titleOwner.source === body.source && revision <= titleOwner.revision) return Promise.resolve({ ok: true })
+        if (revision <= (titleRevisions.get(key) ?? 0)) return Promise.resolve({ ok: true })
+        titleRevisions.delete(key)
+        titleRevisions.set(key, revision)
+        if (titleRevisions.size > 256) titleRevisions.delete(titleRevisions.keys().next().value!)
+        if (body.release === true) {
+          service.setSessionTitles({}, false, key)
+          // No background lease: an undelivered release is superseded by a newly focused page.
+          if (local && titleOwner !== undefined && titleOwner.source === body.source) {
+            titleOwner = undefined
+            service.desktopSessionId = undefined
+          }
+          return Promise.resolve({ ok: true })
+        }
+      }
+      if (body.release === true) return Promise.resolve({ ok: true })
+      if (local && versioned) {
+        const source = body.source as string
+        const revision = body.revision as number
+        const focusedAt = body.focusedAt as number
+        if (titleOwner?.source === source) {
+          if (revision <= titleOwner.revision) return Promise.resolve({ ok: true })
+        } else if (titleOwner !== undefined && focusedAt <= titleOwner.focusedAt) {
+          return Promise.resolve({ ok: true })
+        }
+        titleOwner = {
+          source, revision,
+          focusedAt: Math.max(focusedAt, titleOwner?.focusedAt ?? 0),
+        }
+      } else if (titleOwner !== undefined) {
+        // Legacy/remote clients can update titles without taking desktop ownership.
+        service.setSessionTitles(body.titles, !versioned, versioned ? 'remote:' + body.source : 'legacy')
+        return Promise.resolve({ ok: true })
+      }
+      // Versioned pages replace their own snapshot; legacy payloads remain incremental.
+      service.setSessionTitles(body.titles, !versioned, versioned ? (local ? 'local:' : 'remote:') + body.source : 'legacy')
+      if (local && 'current' in body) {
+        service.desktopSessionId = typeof body.current === 'string' && body.current.length <= 256
+          ? body.current : undefined
+      }
+      return Promise.resolve({ ok: true })
+    }),
     getRoute(ctx, PET_API_PREFIX + '/diagnostics', () => service.diagnostics()),
     postRoute(ctx, PET_API_PREFIX + '/interact', (body) => {
       const kind = body.kind as PetInteraction | undefined

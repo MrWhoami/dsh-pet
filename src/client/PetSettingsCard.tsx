@@ -9,7 +9,7 @@
  * knowledge.
  */
 
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -20,6 +20,7 @@ import { PluginSettingsCard, ValueField, BooleanField, ChoiceField, ToggleSwitch
 import { PetPreview, type PetPreviewDefinition } from './PetPreview.tsx'
 import { CardForm, booleanField, choiceField, numberField, type CardActions, type CardShell, type FieldState as CardFieldState } from './settings-form.ts'
 import sectionCss from './settings-section.module.css'
+import { usePetSurface, setPetSurface, type PetSurface } from './pet-surface.ts'
 
 /** The pet's settings fields this card edits (the namespace's full schema). */
 export interface PetSettings {
@@ -41,6 +42,8 @@ export interface PetSettings {
   decorationEnabled?: boolean
   /** Whether the pet's own session/status bubbles render (issue #6). */
   statusBubbles?: string
+  /** Keep the pet on the desktop after the client window is minimized. */
+  desktopOverlay?: boolean
 }
 
 /** What the pet settings card renders. */
@@ -65,6 +68,8 @@ export interface PetSettingsCardState extends CardShell {
   decorationEnabled: CardFieldState
   /** Whether the pet's own session/status bubbles render. */
   statusBubbles: CardFieldState
+  /** Keep the pet on the desktop after the client window is minimized. */
+  desktopOverlay: CardFieldState
   /** Pet choices (registry ids + display names), loaded from the host. */
   petChoices: readonly { value: string; label: string }[]
   /** The same registry entries with the visual data their thumbnails need. */
@@ -101,6 +106,58 @@ const STATUS_BUBBLE_CHOICES = ['auto', 'off'] as const
 export const SIZE_RANGE = { min: 32, max: 1024, step: 1 }
 export const INSET_RANGE = { min: 0, max: 1000, step: 1 }
 export const BUBBLE_SCALE_RANGE = { min: 0.5, max: 2, step: 0.05 }
+
+/** Liveness of the opt-in desktop companion, as `/api/pet/overlay` serves it. */
+interface OverlayStatusView {
+  supported: boolean
+  running: boolean
+  ready?: boolean
+  dismissed?: boolean
+  error?: string
+}
+
+/**
+ * Poll the companion's liveness while the card is open. A 404 (the plugin is
+ * disabled, so the pet API is absent) reads as "no status" rather than an
+ * error, and a successful read keeps the last known state between polls.
+ */
+function useOverlayStatus(): OverlayStatusView | null {
+  const [status, setStatus] = useState<OverlayStatusView | null>(null)
+  useEffect(() => {
+    let alive = true
+    const load = async (): Promise<void> => {
+      try {
+        const response = await fetch('/api/pet/overlay', { cache: 'no-store' })
+        if (!alive) return
+        if (!response.ok) {
+          setStatus(null)
+          return
+        }
+        const body = (await response.json()) as Partial<OverlayStatusView>
+        if (typeof body.supported !== 'boolean' || typeof body.running !== 'boolean') {
+          setStatus(null)
+          return
+        }
+        setStatus({
+          supported: body.supported,
+          running: body.running,
+          ...(typeof body.ready === 'boolean' ? { ready: body.ready } : {}),
+          ...(typeof body.dismissed === 'boolean' ? { dismissed: body.dismissed } : {}),
+          ...(typeof body.error === 'string' ? { error: body.error } : {}),
+        })
+      } catch {
+        if (alive) setStatus(null)
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => { void load() }, 3000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+  return status
+}
 
 /** One registry choice as served by '/api/pet/pets'. */
 type PetChoice = PetPreviewDefinition
@@ -173,6 +230,7 @@ export class PetSettingsCardController {
       numberField('right'),
       numberField('bottom'),
       numberField('bubbleScale'),
+      booleanField('desktopOverlay'),
       choiceField('petId', this.petChoices),
     ])
     this.store = this.form.bind(() => this.projection())
@@ -341,6 +399,7 @@ export class PetSettingsCardController {
       right: this.form.field('right'),
       bottom: this.form.field('bottom'),
       bubbleScale: this.form.field('bubbleScale'),
+      desktopOverlay: this.form.field('desktopOverlay'),
       petId: fallback
         ? { text: this.stagedPetId ?? this.selectedPetId ?? '', overridden: false, invalid: this.stagedPetId !== undefined && !this.petChoices.includes(this.stagedPetId) }
         : configuredPet.text === '' && this.selectedPetId !== undefined
@@ -416,9 +475,36 @@ export type PetSettingsCardProps =
  * @returns the card.
  */
 export function PetSettingsCard(props: PetSettingsCardProps) {
+  const surface = usePetSurface()
   const { t } = props
   const state = props.usePetSettingsCard(snapshot => snapshot)
   const disabled = !state.writable
+  const overlayStatus = useOverlayStatus()
+  const overlayEnabled = state.desktopOverlay.text === 'true'
+  const overlayUnsupported = overlayStatus !== null && !overlayStatus.supported
+  let overlayHint = overlayStatus === null
+    ? t('settings.desktopOverlayHint')
+    : !overlayStatus.supported
+      ? t('settings.desktopOverlayUnsupported')
+      : !overlayEnabled
+        ? t('settings.desktopOverlayHint')
+        : overlayStatus.dismissed === true && overlayStatus.error === undefined
+          ? t('settings.desktopOverlayDismissed')
+          : overlayStatus.running && overlayStatus.ready !== true
+            ? t('settings.desktopOverlayStarting')
+            : overlayStatus.running
+              ? t('settings.desktopOverlayRunning')
+              : overlayStatus.error === 'overlay-not-installed'
+                ? t('settings.desktopOverlayMissing')
+                : overlayStatus.error !== undefined
+                  ? overlayStatus.dismissed === true
+                    ? t('settings.desktopOverlayFailedDismissed')
+                    : t('settings.desktopOverlayFailed')
+                  : t('settings.desktopOverlayStopped')
+  if (overlayStatus?.error === 'overlay-loopback-required') overlayHint = t('settings.desktopOverlayLoopbackRequired')
+  if (overlayStatus?.error === 'overlay-unsupported-pet') overlayHint = t('settings.desktopOverlayUnsupportedPet')
+  if (overlayStatus?.error === 'overlay-start-failed') overlayHint = t('settings.desktopOverlayStartFailed')
+  if (overlayStatus?.error === 'overlay-stop-failed') overlayHint = t('settings.desktopOverlayStopFailed')
   // The registry is read once, when the plugin starts; the pet API that serves
   // it exists only while the master switch is on. A card that opened empty
   // therefore asks again as soon as the switch is on, instead of leaving the
@@ -563,6 +649,7 @@ export function PetSettingsCard(props: PetSettingsCardProps) {
           </section>
 
           {state.petSelectionFallback ? null : (
+            <>
             <section className={sectionCss.settingsGroup}>
               <div className={sectionCss.groupHeader}>
                 <h3 className={sectionCss.groupTitle} id="settings-pet-behavior-title">{t('settings.bubbleGroup')}</h3>
@@ -607,7 +694,38 @@ export function PetSettingsCard(props: PetSettingsCardProps) {
                 />
               </div>
             </section>
+            </>
           )}
+            <section className={sectionCss.settingsGroup}>
+              <div className={sectionCss.groupHeader}>
+                <h3 className={sectionCss.groupTitle} id="settings-pet-desktop-title">{t('settings.desktopGroup')}</h3>
+              </div>
+              <div className={sectionCss.fields}>
+                {state.petSelectionFallback ? null : <BooleanField
+                  id="settings-pet-desktop-overlay"
+                  label={t('settings.desktopOverlay')}
+                  hint={overlayHint}
+                  inheritLabel={t('settings.inherit')}
+                  onLabel={t('settings.on')}
+                  offLabel={t('settings.off')}
+                  {...fieldProps}
+                  {...state.desktopOverlay}
+                  disabled={disabled || overlayUnsupported}
+                  onEdit={(text) => { props.edit('desktopOverlay', text) }}
+                  onReset={() => { props.resetField('desktopOverlay') }}
+                />}
+                <div>
+                  <label htmlFor="settings-pet-surface">{t('settings.petSurface')}</label>
+                  <select id="settings-pet-surface" value={surface}
+                    onChange={event => { setPetSurface(event.target.value as PetSurface) }}>
+                    <option value="auto">{t('settings.petSurfaceAuto')}</option>
+                    <option value="page">{t('settings.petSurfacePage')}</option>
+                    <option value="desktop">{t('settings.petSurfaceDesktop')}</option>
+                  </select>
+                  <p>{t('settings.petSurfaceHint')}</p>
+                </div>
+              </div>
+            </section>
         </div>
       </div>
     </PluginSettingsCard>

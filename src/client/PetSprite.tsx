@@ -871,6 +871,9 @@ export function PetSprite(props: PetSpriteProps): ReactPortal {
                 {index === 0 && !speaksWhisper && decoration !== undefined && (
                   <StatusOrnament decoration={decoration} phase={phase} />
                 )}
+                {session.title !== undefined && (
+                  <span className={styles.bubbleTitle}>{session.title}</span>
+                )}
                 {session.whisper ?? session.bubble}
               </button>
             )

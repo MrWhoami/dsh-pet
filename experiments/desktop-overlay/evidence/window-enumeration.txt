@@ -1,0 +1,50 @@
+Desktop overlay spike — window evidence
+=======================================
+
+Captured: 2026-11-04 18:57 +08:00
+Host: Windows, dsh-pet 0.4.14 (workspace build), web GUI at http://127.0.0.1:59712
+Client: Microsoft Edge (the DSH web GUI tab), main HWND 200282
+
+API probes (no cookie, loopback only)
+-------------------------------------
+GET http://127.0.0.1:59712/api/pet/state  -> 200
+GET http://127.0.0.1:59712/api/pet/pets   -> 200
+GET http://127.0.0.1:59712/                -> 401 (the SPA stays authed; the pet routes do not)
+
+Overlay process (separate from the browser)
+-------------------------------------------
+PID 44380 (dotnet DshPetOverlay.dll), window title "DSH Pet Overlay"
+EnumWindows output:
+  pid=44380 hwnd=13636474 visible=True
+    rect=(1669,679)-(1873,936)
+    exstyle=0x00080088
+      WS_EX_LAYERED  0x00080000
+      WS_EX_TOOLWINDOW 0x00000080
+      WS_EX_TOPMOST  0x00000008
+
+Client minimized
+----------------
+PostMessage(hwnd=200282, WM_SYSCOMMAND, SC_MINIMIZE, 0) -> True
+  IsIconic(200282) = True
+  IsWindowVisible(200282) = True (the window is iconic; the page is not painted)
+Overlay: visible=True, same rect, still polling /api/pet/state.
+
+The screenshot screenshots/client-minimized.png is the pet/taskbar corner of
+that state (the full-screen capture was cropped to remove unrelated desktop
+content): Edge minimized, desktop wallpaper and taskbar visible, the pet still
+animating at the bottom-right with its status bubble.
+
+Host architecture evidence (0.2.1-rc.5, Electron 44.7.0)
+-------------------------------------------------------
+app.asar/lib/main.js:
+  - the Electron main process spawns the Host child:
+      spawn(node, [entry, runtimeDir, projectDir, ...], { stdio: [ignore, pipe, pipe, ipc] })
+      entry = node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js
+  - the child -> main IPC switch accepts only: ready, shutdown, quit-inspection,
+    update-tasks, platform-session (plus the ready/control reply shapes).
+  - lib/preload-app.cjs exposes no window-creation API; the only window bridge
+    is dshPlatform.open for the account usage/top-up pages.
+app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js:
+  - runProfile drives the dsh "desktop" profile in that child and reports the
+    authenticated URL back to Electron.
+Therefore a plugin cannot create or keep an Electron window of its own.

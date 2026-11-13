@@ -413,6 +413,24 @@ describe('PetSprite status bubble', () => {
     expect(screen.queryByText('正在思考')).not.toBeNull()
   })
 
+  it('puts the session title above the original bubble body', () => {
+    renderPet({
+      snapshot: {
+        ...workingSnapshot,
+        sessions: [{
+          sessionId: 's-title',
+          title: '分析 Playwright CI 报错',
+          animation: 'running',
+          phase: 'thinking',
+          bubble: '正在思考',
+        }],
+      },
+    })
+    const title = screen.getByText('分析 Playwright CI 报错')
+    expect(title.className).toContain('bubbleTitle')
+    expect(screen.getByText('正在思考')).not.toBeNull()
+  })
+
   it('lets transient interaction feedback replace host activity', () => {
     renderPet({
       snapshot: workingSnapshot,

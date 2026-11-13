@@ -21,6 +21,8 @@ import { makePetRoutes } from './routes.ts'
 import { loadPetRegistry, petPackageRoot } from './registry.ts'
 import { BUBBLE_SCALE_MAX, BUBBLE_SCALE_MIN, DEFAULT_PET_ID, DISPLAY_INSET_MAX, DISPLAY_SIZE_MAX, DISPLAY_SIZE_MIN, type PetDisplayConfig } from './persist.ts'
 import { mountOnce } from './mount-once.ts'
+import { dshHome } from './dsh-home.ts'
+import { DesktopOverlay } from './host/overlay.ts'
 
 export { PetService, MAX_SESSION_BUBBLES, DEFAULT_STATUS_BUBBLE_MODE, STATUS_BUBBLE_MODES, statusBubbleMode } from './service.ts'
 export type {
@@ -123,6 +125,21 @@ export {
   PET_ASSET_PREFIX,
 } from './routes.ts'
 
+export {
+  DesktopOverlay,
+  overlayCandidates,
+  overlaySpawnSpec,
+  resolveOverlayCommand,
+} from './host/overlay.ts'
+export type {
+  DesktopOverlayDeps,
+  OverlayChild,
+  OverlayLaunch,
+  OverlaySpawn,
+  OverlayStatus,
+  ResolvedOverlayCommand,
+} from './host/overlay.ts'
+
 /** Stable cordis plugin name (matches cordis.patch.yml insert id). */
 export const name = 'pet'
 
@@ -144,6 +161,7 @@ export const PET_FORM_DEFAULTS = {
   enabled: true,
   decorationEnabled: true,
   statusBubbles: DEFAULT_STATUS_BUBBLE_MODE,
+  desktopOverlay: false,
 } as const
 
 /**
@@ -178,6 +196,17 @@ export interface PetFormConfig {
   bubbleScale?: LiveField<number>
   /** Selected pet id (a registry entry; the service clamps stale values). */
   petId?: LiveField<string | undefined>
+  /**
+   * Keep the pet visible on the desktop after the client window is minimized.
+   * Starts the separate companion window (Windows); off by default because it
+   * is an opt-in desktop surface that needs the companion program installed.
+   */
+  desktopOverlay?: LiveField<boolean>
+  /**
+   * Explicit companion program path. Empty uses discovery: the user runtime
+   * install under `$DSH_HOME/pets/.runtime/`, then the package/dev locations.
+   */
+  desktopOverlayCommand?: LiveField<string>
 }
 
 /**
@@ -211,6 +240,11 @@ export const Config = z.object({
   // bubble surface) needs, and it hides ONLY those bubbles — the sprite, the
   // interaction feedback and a sibling plugin's announcement bubble stay.
   statusBubbles: z.union([...STATUS_BUBBLE_MODES]).default(PET_FORM_DEFAULTS.statusBubbles).volatile(),
+  // Desktop companion: a separate transparent window the Host launches. It is
+  // opt-in and needs a program installed by the user (or a profile-supplied
+  // path), so the plugin never ships or downloads an executable.
+  desktopOverlay: z.boolean().default(PET_FORM_DEFAULTS.desktopOverlay).volatile(),
+  desktopOverlayCommand: z.string().default(''),
 })
 
 /**
@@ -355,6 +389,21 @@ function servedRow(ctx: Context): ServedSettingsRow | undefined {
   }
 }
 
+/**
+ * The origin the companion polls. The host is already listening when a plugin
+ * applies, so this normally returns a concrete URL; a bind failure leaves the
+ * overlay unlaunched with `overlay-no-base-url` instead of inventing a port.
+ * @param ctx - the plugin's context.
+ * @returns the host origin, or an empty string when the server is not bound.
+ */
+function webOrigin(ctx: Context): string {
+  try {
+    return ctx.webServer.getOrigin()
+  } catch {
+    return ''
+  }
+}
+
 /** Register the pet service and its API + asset routes on the context. */
 export const apply = mountOnce('@mrwhoami/dsh-pet', applyImpl)
 
@@ -379,6 +428,18 @@ function applyImpl(ctx: Context, config: PetPluginConfig = {}): void {
   // renames; the id is resolved lazily, once the composition serves it.
   service.settingsNamespaceProvider = () => servedRow(ctx)?.ns
 
+  // The desktop companion is a separate window the Host owns; its lifecycle
+  // follows this fiber, and its program is discovered (never downloaded).
+  const overlay = new DesktopOverlay({
+    home: dshHome(),
+    packageRoot: petPackageRoot(import.meta.url),
+  })
+  ctx.effect(() => () => overlay.dispose(), 'pet: desktop overlay')
+  // The in-page sprite hides only after the companion has loaded its first
+  // frame and reported ready; a crashed/starting companion never leaves the
+  // user with no pet at all.
+  service.desktopOverlayRunningProvider = () => overlay.status().ready
+
   // The effective settings ARE this row's own config: the Host serves one form
   // per profile entry from `Config` above, and every edit is committed into the
   // running config, so the plugin re-reads the section here instead of holding
@@ -395,7 +456,27 @@ function applyImpl(ctx: Context, config: PetPluginConfig = {}): void {
   // pattern as dsh-remote-web-ui's /api/pair family). The routes are
   // registered while the plugin is enabled; toggling the setting off makes
   // the pet API disappear until it is re-enabled.
-  const routes = makePetRoutes({ service, ctx })
+  const routes = makePetRoutes({
+    service,
+    ctx,
+    // The public status carries liveness only: the resolved program path is a
+    // host filesystem detail and this route also answers a paired remote device.
+    overlayStatus: () => {
+      const status = overlay.status()
+      return {
+        supported: status.supported,
+        running: status.running,
+        ready: status.ready,
+        dismissed: status.dismissed,
+        // A spawn failure's message can carry the program path; the public view
+        // only needs the machine-readable class.
+        ...(status.error === undefined ? {} : {
+          error: status.error.startsWith('spawn-failed') ? 'spawn-failed' : status.error,
+        }),
+      }
+    },
+    overlayReady: () => overlay.markReady(),
+  })
   let disposeRoutes: (() => void) | undefined
   const syncRoutes = (): void => {
     const enabled = current().enabled ?? true
@@ -421,7 +502,17 @@ function applyImpl(ctx: Context, config: PetPluginConfig = {}): void {
     const section = current()
     service.applySettingsSection(section)
     service.setEnabled(section.enabled ?? true)
+    // Register the API (including the ready route) before spawning: the
+    // companion fetches state and reports ready as soon as its window loads.
     syncRoutes()
+    // The companion is opt-in and follows the plugin master switch: disabling
+    // the pet or the host disposes the window with the fiber.
+    overlay.sync({
+      enabled: (section.enabled ?? true) && readLive(config.desktopOverlay, PET_FORM_DEFAULTS.desktopOverlay),
+      command: readLive(config.desktopOverlayCommand, ''),
+      baseUrl: webOrigin(ctx),
+      parentPid: process.pid,
+    })
   }
   // A settings edit lands in this row's live config reference and is announced
   // here; the entry is NOT remounted for it, so the pet applies the new section

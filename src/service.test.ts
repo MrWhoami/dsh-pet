@@ -112,6 +112,14 @@ function section(petId: string): PetSettingsSection {
 }
 
 describe('PetService remark layers', () => {
+  it('keeps a stable instance id until the service is recreated', async () => {
+    const first = serviceWithVoicePack({})
+    const second = serviceWithVoicePack({})
+    const id = (await first.state()).serviceInstanceId
+    expect(id).toEqual(expect.any(String))
+    expect((await first.state()).serviceInstanceId).toBe(id)
+    expect((await second.state()).serviceInstanceId).not.toBe(id)
+  })
   it('user keeps the voice-pack remarks after the settings surface applies a section', async () => {
     const voice = { pet: ['Голос: погладили'], noTreats: ['Голос: нет угощений'] }
     const service = serviceWithVoicePack(voice)
@@ -185,5 +193,81 @@ describe('PetService remark layers', () => {
     expect(service.selectedPetId()).toBe('mumbler')
     expect((await service.interact('pet')).reaction).toBe(voice.pet[0])
     expect((await service.interact('feed')).reaction).toBe(voice.noTreats[0])
+  })
+
+  it('projects the desktop companion flag only while it runs', async () => {
+    const service = serviceWithVoicePack({})
+
+    service.desktopOverlayRunningProvider = () => true
+    expect((await service.state()).desktopOverlayRunning).toBe(true)
+
+    // The browser half hides its sprite only while the separate window owns
+    // the pet; a stopped/crashed companion drops the flag on the next poll.
+    service.desktopOverlayRunningProvider = () => false
+    expect((await service.state()).desktopOverlayRunning).toBeUndefined()
+  })
+
+  it('projects client-supplied session titles above the bubble body', async () => {
+    const handlers: Array<(session: unknown, event: unknown) => void> = []
+    const ctx = {
+      reflect: { provide: () => {} },
+      on: (event: string, handler: (session: unknown, event: unknown) => void) => {
+        if (event === 'session/event') handlers.push(handler)
+        return () => {}
+      },
+      get: () => undefined,
+    } as unknown as Context
+    const petsDir = tempDir()
+    writeFileSync(join(petsDir, '.voice.json'), JSON.stringify({ voicePackVersion: 1, remarks: {} }))
+    const registry = loadPetRegistry({
+      packageRoot: petPackageRoot(import.meta.url),
+      petsDir: '',
+      dshPetsDir: petsDir,
+    })
+    const service = new PetService(ctx, { registry, persistDir: tempDir() })
+    const session = { id: 'session-title', header: { origin: 'user' } }
+    service.setSessionTitles({ 'session-title': '分析 Playwright CI 报错' })
+    for (const handler of handlers) {
+      handler(session, { type: 'activity/status', data: { phase: 'thinking', line: '正在思考' } })
+    }
+    const view = await service.state()
+    expect(view.sessions?.find(entry => entry.sessionId === 'session-title')).toMatchObject({
+      title: '分析 Playwright CI 报错',
+      bubble: '正在思考',
+    })
+    service.setSessionTitles({ 'session-title': 'A'.repeat(79) + '\u{1F600}' + 'tail' })
+    const title = (await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title
+    expect(title).toBe('A'.repeat(79) + '\u{1F600}')
+    expect(title?.isWellFormed()).toBe(true)
+    service.setSessionTitles({ phone: 'Phone title' }, true)
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe(title)
+    service.setSessionTitles({ 'session-title': 'Renamed remotely' }, true)
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Renamed remotely')
+    service.setSessionTitles(null, true)
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Renamed remotely')
+    service.setSessionTitles(Object.fromEntries(Array.from({ length: 200 }, (_, id) => ['recent-' + id, 'Recent'])), true)
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBeUndefined()
+    for (const titles of [{}, { 'session-title': '' }, { 'session-title': '   ' }]) {
+      service.setSessionTitles({ 'session-title': 'Old title' })
+      service.setSessionTitles(titles, false)
+      expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBeUndefined()
+    }
+    service.setSessionTitles({ 'session-title': 'Local' }, false, 'local:a')
+    service.setSessionTitles({ 'session-title': 'Phone' }, false, 'remote:b')
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Phone')
+    service.setSessionTitles({}, false, 'remote:b')
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Local')
+    service.setSessionTitles({}, false, 'local:a')
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBeUndefined()
+    const full = { 'session-title': 'Surviving page', ...Object.fromEntries(Array.from({ length: 199 }, (_, i) => ['shared-' + i, 'Title'])) }
+    service.setSessionTitles(full, false, 'local:a')
+    service.setSessionTitles({ ...full, 'session-title': 'Latest page' }, false, 'remote:b')
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Latest page')
+    service.setSessionTitles({}, false, 'remote:b')
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBe('Surviving page')
+    // Bound sources independently even when all of them refer to the same session.
+    for (let i = 0; i < 256; i++) service.setSessionTitles({ 'session-title': String(i) }, false, 'page-' + i)
+    for (let i = 0; i < 256; i++) service.setSessionTitles({}, false, 'page-' + i)
+    expect((await service.state()).sessions?.find(entry => entry.sessionId === 'session-title')?.title).toBeUndefined()
   })
 })

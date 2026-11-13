@@ -5,7 +5,8 @@
  * it without hash-class selectors.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
+import { setPetSurface } from './pet-surface.ts'
 // The npm SDK's client half is a closure-factory bundle for the GUI's
 // __ModuleLoader__ (not importable under vitest); provide the defineStore
 // the pet store needs (same fake-store pattern as the settings-card tests).
@@ -44,7 +45,7 @@ beforeAll(() => {
   document.documentElement.lang = 'zh'
 })
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); setPetSurface('auto'); sessionStorage.clear(); vi.unstubAllGlobals() })
 
 /** Snapshot fixture with the pet hidden (the summon-button state). */
 const hiddenSnapshot: PetStateView = {
@@ -91,11 +92,77 @@ function injected(): PetInjected {
 }
 
 describe('PetDockEntry L2 semantic attributes (#506)', () => {
+  it('allows a tunneled page to keep its pet and a LAN page to use the ready desktop pet', () => {
+    const props = injected()
+    const snapshot = { ...hiddenSnapshot, display: { ...hiddenSnapshot.display, visible: true }, desktopOverlayRunning: true }
+    props.store.actions.setSnapshot(snapshot)
+    const view = render(<PetDockEntry {...props} t={t} />)
+    act(() => { setPetSurface('page') })
+    expect(screen.getByTestId('pet-dock')).toBeTruthy()
+    vi.stubGlobal('location', { hostname: '192.168.1.20' })
+    act(() => { setPetSurface('desktop') })
+    expect(screen.getByTestId('pet-desktop-overlay')).toBeTruthy()
+    act(() => { props.store.actions.setSnapshot({ ...snapshot, desktopOverlayRunning: false }) })
+    view.rerender(<PetDockEntry {...props} t={t} />)
+    expect(screen.getByTestId('pet-dock')).toBeTruthy()
+  })
   it('tags the summon button as the summon-button part', () => {
     const props = injected()
     props.store.actions.setSnapshot(hiddenSnapshot)
     render(<PetDockEntry {...props} t={t} />)
     const summon = screen.getByTestId('pet-summon')
     expect(summon.getAttribute('data-dsh-part')).toBe('summon-button')
+  })
+
+  it('leaves the page surface to the desktop companion while it runs', () => {
+    const props = injected()
+    props.store.actions.setSnapshot({
+      ...hiddenSnapshot,
+      display: { ...hiddenSnapshot.display, visible: true },
+      desktopOverlayRunning: true,
+    })
+    render(<PetDockEntry {...props} t={t} />)
+    // One pet only: neither the in-page sprite nor the summon control renders
+    // while the separate desktop window owns the pet.
+    expect(screen.queryByTestId('pet-dock')).toBeNull()
+    expect(screen.queryByTestId('pet-summon')).toBeNull()
+    expect(screen.getByTestId('pet-desktop-overlay')).toBeTruthy()
+  })
+
+  it('hides the page pet in the desktop app and restores it when the companion stops', () => {
+    vi.stubGlobal('location', { protocol: 'dsh-app:', hostname: 'app' })
+    const props = injected()
+    const snapshot = {
+      ...hiddenSnapshot,
+      display: { ...hiddenSnapshot.display, visible: true },
+      desktopOverlayRunning: true,
+    }
+    props.store.actions.setSnapshot(snapshot)
+    const view = render(<PetDockEntry {...props} t={t} />)
+    expect(screen.queryByTestId('pet-dock')).toBeNull()
+    expect(screen.queryByTestId('pet-summon')).toBeNull()
+    expect(screen.getByTestId('pet-desktop-overlay')).toBeTruthy()
+    props.store.actions.setSnapshot({ ...snapshot, desktopOverlayRunning: false })
+    view.rerender(<PetDockEntry {...props} t={t} />)
+    expect(screen.getByTestId('pet-dock')).toBeTruthy()
+  })
+
+  it('keeps the summon button available while the desktop pet is hidden', () => {
+    const props = injected()
+    props.store.actions.setSnapshot({ ...hiddenSnapshot, desktopOverlayRunning: true })
+    render(<PetDockEntry {...props} t={t} />)
+    expect(screen.getByTestId('pet-summon')).toBeTruthy()
+  })
+
+  it('keeps the page pet on a remote browser', () => {
+    vi.stubGlobal('location', { hostname: '192.168.1.20' })
+    const props = injected()
+    props.store.actions.setSnapshot({
+      ...hiddenSnapshot,
+      display: { ...hiddenSnapshot.display, visible: true },
+      desktopOverlayRunning: true,
+    })
+    render(<PetDockEntry {...props} t={t} />)
+    expect(screen.getByTestId('pet-dock')).toBeTruthy()
   })
 })

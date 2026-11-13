@@ -13,6 +13,8 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import { randomUUID } from 'node:crypto'
+import { boundedSessionTitle } from './session-title.ts'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AffinityConfig, AffinityRankName, PetAffinityView, PetInteraction } from './affinity.ts'
@@ -174,6 +176,8 @@ export const PET_SETTINGS_NAMESPACE = 'pet'
 export interface PetSessionView {
   /** Session identity (stringified for the wire; never exposed as a key). */
   sessionId: string
+  /** Human-readable session/project title from the GUI session list, when known. */
+  title?: string
   /** The animation this session's activity maps onto. */
   animation: PetStateSnapshot['animation']
   /** This session's status bubble copy. */
@@ -200,6 +204,15 @@ export interface PetStateView {
    * stay consumable. The single 'bubble' above mirrors the display session.
    */
   sessions?: PetSessionView[]
+  /**
+   * True while the opt-in desktop companion window is showing this pet. The
+   * browser half hides its in-page sprite and summon button then, so exactly
+   * one pet is visible; absent on hosts without the companion or when it is
+   * not running.
+   */
+  desktopOverlayRunning?: boolean
+  /** Changes when the service restarts; absent on older hosts. */
+  serviceInstanceId?: string
   /** Affinity ledger snapshot. */
   affinity: PetAffinityView
   /** Display configuration. */
@@ -363,6 +376,12 @@ export class PetService extends Service {
    * disposed sessions are removed by the 'session/disposed' listener.
    */
   private readonly sessionActivity = new Map<Session, SessionActivity>()
+  /** Client-supplied GUI session titles, keyed by stringified session id. */
+  private sessionTitles = new Map<string, string>()
+  private readonly titleSources = new Map<string, Map<string, string>>()
+  private readonly serviceInstanceId = randomUUID()
+  /** Main-view session reported by the local GUI, used only by the desktop window. */
+  desktopSessionId: string | undefined = undefined
   /**
    * Hover-panel actions registered by sibling plugins (issue #6). The pet owns
    * the panel row and serves the registrations; each plugin owns the callback a
@@ -385,6 +404,14 @@ export class PetService extends Service {
    * plugin runs outside a Loader and the package's own id stands.
    */
   settingsNamespaceProvider: (() => string | undefined) | undefined = undefined
+
+  /**
+   * Whether the opt-in desktop companion window is currently showing the pet.
+   * While it runs, the browser half hides its own sprite and summon button so
+   * the user sees exactly one pet; a crashed companion makes the page pet
+   * return on the next poll. `apply` wires this to the launcher.
+   */
+  desktopOverlayRunningProvider: (() => boolean) | undefined = undefined
 
   constructor(ctx: Context, config: PetConfig = {}) {
     super(ctx, 'pet')
@@ -995,6 +1022,50 @@ export class PetService extends Service {
   }
 
   /**
+   * Replace the GUI's session-title snapshot. The browser half owns the session
+   * list (the pet surface is host-global and cannot read it), so it posts the
+   * titles; the desktop companion and the in-page bubble stack read them back
+   * from the state view.
+   * @param titles - record of stringified session id to display title.
+   * @param merge - retain omitted titles from this source (legacy clients).
+   * @param source - snapshot source; at most 256 sources share 200 distinct session ids.
+   */
+  setSessionTitles(titles: unknown, merge = false, source = 'legacy'): void {
+    const next = new Map<string, string>()
+    if (titles !== null && typeof titles === 'object' && !Array.isArray(titles)) {
+      for (const [id, value] of Object.entries(titles as Record<string, unknown>)) {
+        if (next.size >= 200) break
+        if (typeof value !== 'string') continue
+        const title = boundedSessionTitle(value)
+        if (title !== '') next.set(id, title)
+      }
+    }
+    if (merge) {
+      for (const [id, title] of this.titleSources.get(source) ?? []) {
+        if (next.size >= 200) break
+        if (!next.has(id)) next.set(id, title)
+      }
+    }
+    this.titleSources.delete(source)
+    if (next.size > 0) this.titleSources.set(source, next)
+    if (this.titleSources.size > 256) this.titleSources.delete(this.titleSources.keys().next().value!)
+    // Newest accepted source wins conflicts. Prune stored entries as well as
+    // the projected map so abandoned pages cannot accumulate unbounded data.
+    const combined = new Map<string, string>()
+    for (const [key, entries] of [...this.titleSources].reverse()) {
+      for (const [id, title] of entries) {
+        // The same session in another source must not consume another slot:
+        // retain its fallback value for when the newer source leaves.
+        if (combined.has(id)) continue
+        if (combined.size >= 200) entries.delete(id)
+        else combined.set(id, title)
+      }
+      if (entries.size === 0) this.titleSources.delete(key)
+    }
+    this.sessionTitles = combined
+  }
+
+  /**
    * Apply a committed settings section to the persisted selection and display
    * config. Called by the settings surface on every change; values are
    * clamped exactly like the setConfig RPC so both write paths converge.
@@ -1078,8 +1149,10 @@ export class PetService extends Service {
       const freshWhisper = whisper !== undefined && Date.now() - whisper.at < WHISPER_TTL_MS
         ? whisper.text
         : undefined
+      const title = this.sessionTitles.get(String(session.id))
       sessions.push({
         sessionId: String(session.id),
+        ...(title === undefined ? {} : { title }),
         animation: perSession.animation,
         bubble: perSession.bubble,
         phase: perSession.phase,
@@ -1123,10 +1196,12 @@ export class PetService extends Service {
     const panelActions = this.panelActions.views()
     return {
       animation: snapshot.animation,
+      serviceInstanceId: this.serviceInstanceId,
       ...(snapshot.bubble === undefined ? {} : { bubble: snapshot.bubble }),
       phase: snapshot.phase,
       sessionActive: snapshot.sessionActive,
       sessions,
+      ...(this.desktopOverlayRunningProvider?.() === true ? { desktopOverlayRunning: true } : {}),
       ...(decoration === undefined ? {} : { decoration }),
       ...(announcement === undefined ? {} : { announcement }),
       ...(announcements.length === 0 ? {} : { announcements }),

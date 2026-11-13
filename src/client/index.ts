@@ -45,6 +45,9 @@ import { PetSettingsCardController, type PetSettings } from './PetSettingsCard.t
 import { installPetSettingsRegistration } from './settings-registration.ts'
 import { NS, en, zh } from './locales.ts'
 import { mainViewSessionId } from './main-session.ts'
+import { sessionTitleSnapshot } from './session-titles.ts'
+import { petSurface } from './pet-surface.ts'
+import { createSessionTitleSync, type SessionTitleUpdate } from './session-title-sync.ts'
 import { reportDailyHeartbeat } from './telemetry.ts'
 
 /** The host pet API as the browser sees it (same-origin JSON endpoints). */
@@ -58,6 +61,7 @@ interface PetHttpApi {
   setName(name: string): Promise<{ ok: true; name: string } | { ok: false; error: string }>
   setPet(petId: string): Promise<{ ok: true; petId: string } | { ok: false; error: string }>
   panelAction(id: string): Promise<{ ok: boolean; error?: string }>
+  setSessionTitles(snapshot: SessionTitleUpdate, signal: AbortSignal): Promise<{ ok: true }>
   setSkin(skin?: string): Promise<{ ok: boolean; error?: string; skin?: string }>
   gameplayTouch(zone?: string): Promise<PetGameplayVerbResult>
   gameplaySetMode(mode: string | null): Promise<PetGameplayVerbResult>
@@ -66,24 +70,29 @@ interface PetHttpApi {
 }
 
 /** Same-origin JSON fetch helper (GET without body, POST with JSON body). */
-async function petFetch<T>(path: string, body?: unknown): Promise<T> {
+async function petFetch<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, body === undefined
     ? {}
     : {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        ...(signal === undefined ? {} : { signal }),
       })
   if (!response.ok) {
-    throw new Error('pet ' + path + ' failed: ' + response.status)
+    throw Object.assign(new Error('pet ' + path + ' failed: ' + response.status), { status: response.status })
   }
   return (await response.json()) as T
 }
 
 /** The live host API instance (always defined; failures surface per call). */
 const petApi: PetHttpApi = {
-  state: (currentSessionId) => petFetch('/api/pet/state'
-    + (currentSessionId === undefined ? '' : '?current=' + encodeURIComponent(currentSessionId))),
+  state: (currentSessionId) => {
+    const query = new URLSearchParams()
+    if (currentSessionId !== undefined) query.set('current', currentSessionId)
+    if (petSurface() === 'desktop') query.set('surface', 'desktop')
+    return petFetch('/api/pet/state' + (query.size === 0 ? '' : '?' + query))
+  },
   pets: () => petFetch('/api/pet/pets'),
   interact: (kind) => petFetch('/api/pet/interact', { kind }),
   setVisible: (visible) => petFetch('/api/pet/set-visible', { visible }),
@@ -91,6 +100,7 @@ const petApi: PetHttpApi = {
   setName: (name) => petFetch('/api/pet/set-name', { name }),
   setPet: (petId) => petFetch('/api/pet/set-pet', { petId }),
   panelAction: (id) => petFetch('/api/pet/panel-action', { id }),
+  setSessionTitles: (snapshot, signal) => petFetch('/api/pet/session-titles', snapshot, signal),
   setSkin: (skin) => petFetch('/api/pet/set-skin', skin === undefined ? {} : { skin }),
   gameplayTouch: (zone) => petFetch('/api/pet/gameplay/touch', zone === undefined ? {} : { zone }),
   gameplaySetMode: (mode) => petFetch('/api/pet/gameplay/mode', { mode }),
@@ -432,6 +442,17 @@ export function apply(ctx: ClientContext): void {
       const sessions = ctx.sessions as unknown as ISessions
       const currentSessionId = (): string | undefined => mainViewSessionId(sessions.list.getSnapshot().byId)
 
+      // The pet surface is host-global and cannot read the GUI session list:
+      // push the current session/project titles to the host so both the page
+      // bubble stack and the desktop companion can show a title line.
+      const titleSync = createSessionTitleSync(petApi.setSessionTitles)
+      const syncSessionTitles = (force = false): void => {
+        const list = sessions.list.getSnapshot()
+        const snapshot = sessionTitleSnapshot(list.byId, currentSessionId(),
+          petStore.getSnapshot().snapshot?.sessions?.map(session => session.sessionId) ?? [])
+        titleSync.publish(snapshot, document.visibilityState === 'visible' && document.hasFocus(), force)
+      }
+
       // The registry list is fetched lazily with retries baked into the poll
       // cycle: until it lands, the dock entry renders nothing and every 2s
       // tick tries again. After it lands, one list feeds both the sprite and
@@ -442,7 +463,9 @@ export function apply(ctx: ClientContext): void {
       // response may publish, so a slow older one can never roll the
       // snapshot back.
       let stateSeq = 0
+      let stateDisconnected = false
       const pollNow = (): void => {
+        syncSessionTitles()
         if (!petsLoaded) {
           petApi.pets().then((list) => {
             petsLoaded = true
@@ -456,8 +479,15 @@ export function apply(ctx: ClientContext): void {
         petApi.state(currentSessionId()).then((snapshot) => {
           if (seq !== stateSeq) return
           setSnapshot(snapshot)
+          const hostChanged = titleSync.observeHost(snapshot.serviceInstanceId)
+          if (stateDisconnected || hostChanged) {
+            stateDisconnected = false
+            if (!hostChanged) titleSync.reconnect()
+            syncSessionTitles(true)
+          }
         }, () => {
           if (seq !== stateSeq) return
+          stateDisconnected = true
           setState('error', 'pet.state transport error')
         })
       }
@@ -482,6 +512,7 @@ export function apply(ctx: ClientContext): void {
         }
         const onVisibility = (): void => {
           if (document.visibilityState === 'visible') {
+            syncSessionTitles(true)
             pollNow()
             start()
           } else {
@@ -489,18 +520,43 @@ export function apply(ctx: ClientContext): void {
           }
         }
         start()
+        const onFocus = (): void => { syncSessionTitles(true) }
+        const onPageHide = (): void => {
+          stop()
+          const update = titleSync.release()
+          if (update === undefined) return
+          void fetch('/api/pet/session-titles', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(update), keepalive: true,
+          }).catch(() => {})
+        }
+        const onPageShow = (): void => {
+          titleSync.resume()
+          syncSessionTitles(true)
+          pollNow()
+          start()
+        }
+        window.addEventListener('focus', onFocus)
+        window.addEventListener('pagehide', onPageHide)
+        window.addEventListener('pageshow', onPageShow)
         document.addEventListener('visibilitychange', onVisibility)
         return () => {
           stop()
+          window.removeEventListener('focus', onFocus)
+          window.removeEventListener('pagehide', onPageHide)
+          window.removeEventListener('pageshow', onPageShow)
           document.removeEventListener('visibilitychange', onVisibility)
         }
       }, 'pet: poll')
 
       // A current-session switch should re-order the bubble stack right away,
-      // not on the next 2s tick. Poll only while the tab is visible, as the
-      // poll loop itself does.
+      // not on the next 2s tick. Titles are pushed even while the tab is
+      // hidden: the desktop companion is most useful exactly then. The heavier
+      // state poll stays visibility-gated.
       const disposeSessionWatch = ctx.effect(() => {
+        syncSessionTitles()
         const unsubscribe = sessions.list.subscribe(() => {
+          syncSessionTitles()
           if (document.visibilityState === 'visible') pollNow()
         })
         return unsubscribe
@@ -663,6 +719,7 @@ export function apply(ctx: ClientContext): void {
       disposeUi = () => {
         if (uiGone) return
         uiGone = true
+        titleSync.dispose()
         clearUiTeardown?.()
         clearUiTeardown = undefined
         unsubscribeLocale()

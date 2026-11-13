@@ -352,6 +352,27 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-pet
 
 After installing, **restart `dsh web`** — your selected pet appears at the bottom-right of the interface. In link mode, `pnpm build` and refresh the page after a code change; no reinstall needed.
 
+## Desktop companion (opt-in, Windows)
+
+The pet normally lives in the GUI page, so minimizing the client hides it. The opt-in desktop companion is a separate transparent, always-on-top window: **Settings → Pet → Desktop → Desktop overlay**. While it runs, the in-page sprite hides, so there is exactly one pet; closing the companion brings the page pet back. It stacks one status bubble per active session (collapsed to the current bubble plus a `+N` badge; click it to expand); each bubble shows the GUI session/project title above the original status body, and the hover panel below the pet shows the pet name and rank, treat stock, affinity points and feed / rename / hide. The page pet hides only after the companion reports ready; a clean user close/hide marks it dismissed, so unrelated settings edits do not restart it — flip the switch off and on to start it again.
+
+The plugin ships **no executable and downloads none**. From a repository checkout, build the companion in [`experiments/desktop-overlay`](experiments/desktop-overlay/README.md) and publish it where the Host looks:
+
+```powershell
+dotnet publish experiments/desktop-overlay -c Release -r win-x64 --self-contained false `
+  -o "$env:DSH_HOME\pets\.runtime\dsh-pet-overlay"
+```
+
+(Requires the .NET 8 Desktop Runtime; the published folder carries `libwebpdecoder.dll` next to the exe. A profile may instead set `desktopOverlayCommand` to an explicit program path.) `sprite2d` pets animate; `frames2d` pets without gameplay show their first frame. Pets with gameplay (such as jyn) and `live2d` pets keep using the page renderer: the companion exits with an unsupported-pet message, preserving the page gameplay loop. macOS/Linux have no companion yet. The Host treats a companion without a valid `companion.protocol` marker matching the executable and managed DLL hashes as legacy-ready, hiding the page pet on process startup without a ready timeout. A current companion tolerates a missing ready route only when the Host did not advertise protocol 2; with protocol 2, a missing ready route is a loading failure. Publish the companion from the same checkout as the plugin when possible.
+
+Startup retries transient loading failures up to three times, with a three-second budget per attempt and a ten-second total budget including the ready handshake (below the Host's fifteen-second watchdog). Loading failures and unsupported pets have distinct settings messages; after resolving a failure or selecting a supported pet, turn the switch off and on to restart. The ready endpoint accepts only loopback requests; public status omits the process ID.
+
+To retain LAN access, bind `webServer.host` to `0.0.0.0` or `::`; the companion connects to `127.0.0.1` or `::1` on the same port without changing the Host listener. Binding only a specific LAN IP does not provide loopback access and is unsupported; HTTPS requires a trusted certificate valid for the loopback address.
+
+**Current client display:** Pet settings offer “Auto / Keep page pet / Use desktop pet”, applied immediately and stored only for the current tab without changing the Host switch. Use “Keep page pet” for SSH tunnels or reverse proxies, and “Use desktop pet” when accessing a local Host through its LAN address. The latter hides a supported page pet only while the companion is ready, restoring it when the companion stops. Auto still infers location from the address and cannot reliably determine whether the browser shares the Host's screen; access authentication is unchanged.
+
+Versioned clients replace their own full title snapshot; clearing affects only that source. The most recently accepted source wins for a shared session. All sources share a limit of 200 distinct sessions, retaining per-source fallback titles without counting duplicates again. Sources have a separate limit of 256, evicting the least recently updated source. Legacy clients still merge incrementally. Page exit attempts to release desktop session ownership, and stale requests cannot reclaim it. Crashes or network failures can prevent release; a newly focused page can take over. There is currently no background lease timeout.
+
 ## Development
 
 ```sh
@@ -375,6 +396,7 @@ OUO Neko uses the extended v2 contract: a 1536×2288 atlas with the same 9 anima
 - Asset serving resolves both the pet directory and the candidate file through `realpath`; symlink escapes are refused (403). Files are size-capped before being read into memory (manifest 64 KB, imagery 20 MB; over-cap answers 413).
 - Live2D models are served by closure: only the manifest, the declared primary assets, and the files the `.model3.json` references (each screened against traversal, absolute and URL forms).
 - The plugin never downloads executables and never bundles the Live2D Cubism Core.
+- The optional desktop companion is a user-installed local program under `$DSH_HOME/pets/.runtime/dsh-pet-overlay/`; the plugin neither bundles nor downloads it, and only launches a path it discovers (or an explicit `desktopOverlayCommand` from the profile).
 - Manifests are fail-closed on structure: unknown fields or renderers reject the entry instead of loading a half-broken pet (run `node scripts/dsh-pet validate <dir>` to read the rejection reason).
 
 ## Telemetry

@@ -15,6 +15,8 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PetDisplayConfig } from '../persist.ts'
+import { isLoopbackHostname } from '../loopback.ts'
+import { usePetSurface } from './pet-surface.ts'
 import type { PetStoreInstance } from './pet-store.ts'
 import { PetSprite } from './PetSprite.tsx'
 import { PetRendererSwitch } from './renderers/PetRendererSwitch.tsx'
@@ -89,7 +91,9 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
   const snapshot = ui.snapshot
   const feedback = ui.feedback
   const definition = ui.pets.find(entry => entry.id === snapshot?.pet.id) ?? null
+  const overlayRunning = snapshot?.desktopOverlayRunning === true
   const visible = snapshot?.display.visible ?? true
+  const surface = usePetSurface()
 
   useEffect(() => {
     ensure()
@@ -103,6 +107,18 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
   }
   const aux = auxRef.current
   const gameplay = definition?.gameplay
+
+  // On the local desktop the companion owns the visible pet: no in-page sprite and
+  // no summon button, or the user would see two pets (and a stray summon
+  // control) on top of the desktop window. Hidden pets retain their summon button.
+  // Remote browsers keep their own surface. A crashed companion clears the flag
+  // on the next poll and the page surface comes back. The mount stays present
+  // so the dock's lifecycle and store subscription are unchanged.
+  // Gameplay still runs in the page HUD; the companion cannot take it over.
+  if (overlayRunning && visible && gameplay === undefined && snapshot?.gameplay === undefined && surface !== 'page'
+    && (surface === 'desktop' || location.protocol === 'dsh-app:' || isLoopbackHostname(location.hostname))) {
+    return <span data-pet-dock-overlay data-testid="pet-desktop-overlay" />
+  }
 
   if (visible) {
     return (

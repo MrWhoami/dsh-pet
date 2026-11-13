@@ -6,7 +6,8 @@
  * when the Host form is absent.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { petSurface, setPetSurface } from './pet-surface.ts'
 import { useSyncExternalStore } from 'react'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BUBBLE_SCALE_RANGE, INSET_RANGE, PetSettingsCard, PetSettingsCardController, SIZE_RANGE, type PetSettings } from './PetSettingsCard.tsx'
@@ -77,7 +78,10 @@ beforeAll(() => {
 })
 
 afterEach(() => {
+  document.documentElement.lang = 'zh'
   cleanup()
+  sessionStorage.clear()
+  setPetSurface('auto')
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
@@ -123,7 +127,7 @@ describe('pet selection without a Host settings form', () => {
   it('user sees the selection go back when the pet API refuses it', async () => {
     // Given the Host has no pet form and the pet API still serves its selection
     vi.useFakeTimers()
-    const { scope } = unavailableForm()
+    const { scope, mutate } = unavailableForm()
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }, { id: 'jyn', displayName: '女仆鲸鱼娘' }])
@@ -206,7 +210,7 @@ describe('pet settings card rendered without a Host settings form', () => {
   it('shows the visibility switch beside the pet choice and hides the Host-only fields', async () => {
     // Given the aggregate shell exposes no pet configuration form
     vi.useFakeTimers()
-    const { scope } = unavailableForm()
+    const { scope, mutate } = unavailableForm()
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
@@ -237,6 +241,9 @@ describe('pet settings card rendered without a Host settings form', () => {
     // ...while the fields only the absent Host form owns stay hidden
     expect(screen.queryByRole('switch')).toBeNull()
     expect(screen.queryByLabelText(t('settings.size'))).toBeNull()
+    fireEvent.change(screen.getByLabelText(t('settings.petSurface')), { target: { value: 'page' } })
+    expect(petSurface()).toBe('page')
+    expect(mutate).not.toHaveBeenCalled()
     controller.dispose()
   })
 })
@@ -296,6 +303,148 @@ describe('the status bubble switch on the Host settings form', () => {
       invalid: true,
       statusBubbles: { text: 'maybe', invalid: true },
     })
+  })
+})
+
+describe('the desktop overlay switch on the Host settings form', () => {
+  it('writes the opt-in desktop companion through one form mutation', async () => {
+    // Given a Host that serves the pet namespace with the companion off
+    vi.useFakeTimers()
+    const { scope, value, mutate } = readyForm({ desktopOverlay: false })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
+      if (path === '/api/pet/state') return response({ pet: { id: 'whale-girl' }, display: { visible: true } })
+      if (path === '/api/pet/overlay') return response({ supported: true, running: false })
+      throw new Error('unexpected request: ' + path)
+    }))
+    const controller = new PetSettingsCardController(scope)
+    await vi.advanceTimersByTimeAsync(0)
+    const face = controller.inject()
+    const state = () => face.hooks.petSettingsCard.getSnapshot()
+
+    // When the card renders, the switch is on screen
+    render(
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={select => useSyncExternalStore(face.hooks.petSettingsCard.subscribe, () => select(face.hooks.petSettingsCard.getSnapshot()))}
+        save={face.save}
+        discard={face.discard}
+        edit={face.edit}
+        resetField={face.resetField}
+        refreshPets={face.refreshPets}
+      />,
+    )
+    expect(screen.getByLabelText(t('settings.desktopOverlay'))).toBeTruthy()
+    expect(state()).toMatchObject({ desktopOverlay: { text: 'false', invalid: false } })
+    fireEvent.change(screen.getByLabelText(t('settings.petSurface')), { target: { value: 'page' } })
+    expect(petSurface()).toBe('page')
+    expect(mutate).not.toHaveBeenCalled()
+
+    // When the user turns it on
+    face.edit('desktopOverlay', 'true')
+    expect(state()).toMatchObject({ desktopOverlay: { text: 'true' } })
+    await vi.waitFor(() => { expect(state().saving).toBe(false) })
+
+    // Then the settings document holds the opt-in, and the draft clears
+    expect(mutate).toHaveBeenCalledWith([{ op: 'set', path: ['desktopOverlay'], value: true }])
+    expect(value().user?.desktopOverlay).toBe(true)
+    expect(state()).toMatchObject({ dirty: false, failed: false, desktopOverlay: { text: 'true' } })
+    controller.dispose()
+  })
+
+  it('tells the user a closed companion needs the switch cycled', async () => {
+    const { scope } = readyForm({ desktopOverlay: true })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
+      if (path === '/api/pet/state') return response({ pet: { id: 'whale-girl' }, display: { visible: true } })
+      if (path === '/api/pet/overlay') return response({ supported: true, running: false, dismissed: true })
+      throw new Error('unexpected request: ' + path)
+    }))
+    const controller = new PetSettingsCardController(scope)
+    const face = controller.inject()
+    render(
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={select => useSyncExternalStore(face.hooks.petSettingsCard.subscribe, () => select(face.hooks.petSettingsCard.getSnapshot()))}
+        save={face.save}
+        discard={face.discard}
+        edit={face.edit}
+        resetField={face.resetField}
+        refreshPets={face.refreshPets}
+      />,
+    )
+    await screen.findByText(t('settings.desktopOverlayDismissed'))
+    controller.dispose()
+  })
+
+  it.each([
+    ['overlay-timeout', 'settings.desktopOverlayFailedDismissed', 'zh'],
+    ['overlay-start-failed', 'settings.desktopOverlayStartFailed', 'zh'],
+    ['overlay-unsupported-pet', 'settings.desktopOverlayUnsupportedPet', 'zh'],
+    ['overlay-unsupported-pet', 'settings.desktopOverlayUnsupportedPet', 'en'],
+  ] as const)('explains companion failure %s (%s, %s)', async (error: string, message: string, lang: string) => {
+    document.documentElement.lang = lang
+    const { scope } = readyForm({ desktopOverlay: true })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
+      if (path === '/api/pet/state') return response({ pet: { id: 'whale-girl' }, display: { visible: true } })
+      if (path === '/api/pet/overlay') return response({ supported: true, running: false, dismissed: true, error })
+      throw new Error('unexpected request: ' + path)
+    }))
+    const controller = new PetSettingsCardController(scope)
+    const face = controller.inject()
+    render(
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={select => useSyncExternalStore(face.hooks.petSettingsCard.subscribe, () => select(face.hooks.petSettingsCard.getSnapshot()))}
+        save={face.save}
+        discard={face.discard}
+        edit={face.edit}
+        resetField={face.resetField}
+        refreshPets={face.refreshPets}
+      />,
+    )
+    const hint = await screen.findByText(t(message))
+    if (error === 'overlay-unsupported-pet') {
+      // The selected whale is supported; this must describe the previous exit,
+      // with recovery instructions, rather than label the current pet unsupported.
+      expect(hint.textContent).toContain(lang === 'zh' ? '上次伴生窗' : 'The companion last exited')
+      expect(hint.textContent).toContain(lang === 'zh' ? '选择受支持的宠物后' : 'After selecting a supported pet')
+      expect(hint.textContent).toContain(lang === 'zh' ? '关闭再打开此开关' : 'turn this switch off and on')
+    }
+    controller.dispose()
+  })
+
+  it.each([
+    { error: 'overlay-loopback-required', running: false, enabled: true, hint: 'settings.desktopOverlayLoopbackRequired' },
+    { error: 'overlay-stop-failed', running: true, enabled: false, hint: 'settings.desktopOverlayStopFailed' },
+  ] as const)('explains $error even when the switch is $enabled', async ({ error, running, enabled, hint }: { error: string; running: boolean; enabled: boolean; hint: string }) => {
+    const { scope } = readyForm({ desktopOverlay: enabled })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/pet/pets') return response([{ id: 'whale-girl', displayName: '鲸鱼娘' }])
+      if (path === '/api/pet/state') return response({ pet: { id: 'whale-girl' }, display: { visible: true } })
+      if (path === '/api/pet/overlay') return response({ supported: true, running, error })
+      throw new Error('unexpected request: ' + path)
+    }))
+    const controller = new PetSettingsCardController(scope)
+    const face = controller.inject()
+    render(
+      <PetSettingsCard
+        t={t}
+        usePetSettingsCard={select => useSyncExternalStore(face.hooks.petSettingsCard.subscribe, () => select(face.hooks.petSettingsCard.getSnapshot()))}
+        save={face.save}
+        discard={face.discard}
+        edit={face.edit}
+        resetField={face.resetField}
+        refreshPets={face.refreshPets}
+      />,
+    )
+    await screen.findByText(t(hint))
+    controller.dispose()
   })
 })
 

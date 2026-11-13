@@ -152,6 +152,22 @@
   pointer-events: auto;
 }
 
+/* 会话/项目标题：气泡上方的小标题行，主体仍是原来的状态/碎碎念文案。 */
+.bubbleTitle {
+  display: block;
+  max-width: calc(250px * var(--pet-bubble-scale, 1));
+  margin-bottom: calc(2px * var(--pet-bubble-scale, 1));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(10.5px * var(--pet-bubble-scale, 1));
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  color: #9db4ff;
+  text-align: left;
+}
+
 .bubbleClickable {
   cursor: pointer;
   font: inherit;

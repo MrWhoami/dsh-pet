@@ -1,0 +1,206 @@
+<Window x:Class="DshPetOverlay.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DSH Pet Overlay"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True"
+        SizeToContent="WidthAndHeight"
+        Opacity="0"
+        Loaded="OnLoaded"
+        Closed="OnClosed"
+        SourceInitialized="OnSourceInitialized"
+        MouseLeftButtonDown="OnWindowMouseLeftButtonDown">
+    <Window.Resources>
+        <Style x:Key="HoverPanelBorder" TargetType="Border">
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="10,9" />
+            <Setter Property="Margin" Value="0,6,0,0" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="#4D7E98FF" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="Background">
+                <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#F21A2440" Offset="0" />
+                        <GradientStop Color="#F70A0F1F" Offset="1" />
+                    </LinearGradientBrush>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.45" Color="#020617" />
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="PanelAction" TargetType="Button">
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="5,8" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Background">
+                <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#4A68F5" Offset="0" />
+                        <GradientStop Color="#3A55E0" Offset="1" />
+                    </LinearGradientBrush>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Opacity" Value="0.9" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Opacity" Value="0.75" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="SessionToggle" TargetType="Button">
+            <Setter Property="Background" Value="#CC1A2440" />
+            <Setter Property="Foreground" Value="#9DB4FF" />
+            <Setter Property="BorderBrush" Value="#4D7E98FF" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="7,2" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,0,0,4" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="9"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#CC2A3A66" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid x:Name="Root" Background="Transparent">
+        <StackPanel x:Name="Stack" VerticalAlignment="Bottom" HorizontalAlignment="Center">
+            <Border x:Name="Bubble"
+                    Style="{StaticResource BubbleBorder}"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Center"
+                    MaxWidth="300">
+                <TextBlock x:Name="BubbleText"
+                           Foreground="#F4F7FF"
+                           FontFamily="Microsoft YaHei UI, Segoe UI"
+                           FontSize="12.5"
+                           LineHeight="18"
+                           TextWrapping="Wrap"
+                           MaxWidth="272" />
+            </Border>
+            <ScrollViewer x:Name="SessionScroll"
+                          HorizontalAlignment="Center"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="SessionStack" Margin="0,0,0,4" />
+            </ScrollViewer>
+            <Grid x:Name="SpriteHost"
+                  Background="#01000000"
+                  HorizontalAlignment="Center"
+                  MouseEnter="OnSpriteMouseEnter"
+                  MouseLeave="OnSpriteMouseLeave">
+                <Image x:Name="SpriteImage"
+                       Stretch="Fill"
+                       RenderOptions.BitmapScalingMode="HighQuality"
+                       SnapsToDevicePixels="True" />
+            </Grid>
+            <Border x:Name="HoverPanel"
+                    Style="{StaticResource HoverPanelBorder}"
+                    Visibility="Collapsed"
+                    MouseEnter="OnHoverPanelMouseEnter"
+                    MouseLeave="OnHoverPanelMouseLeave">
+                <StackPanel Width="232">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="PanelName"
+                                   Grid.Column="0"
+                                   FontSize="12.5"
+                                   FontWeight="SemiBold"
+                                   MaxWidth="128"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center">
+                            <TextBlock.Foreground>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                    <GradientStop Color="#A9C1FF" Offset="0" />
+                                    <GradientStop Color="#6C8BFF" Offset="0.6" />
+                                    <GradientStop Color="#4D6BFE" Offset="1" />
+                                </LinearGradientBrush>
+                            </TextBlock.Foreground>
+                        </TextBlock>
+                        <TextBlock x:Name="PanelRank"
+                                   Grid.Column="1"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="#9DB4FF"
+                                   Margin="8,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+                    <Grid Margin="0,5,0,0">
+                        <TextBlock x:Name="PanelTreats"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="#7DD3FC" />
+                        <TextBlock x:Name="PanelPoints"
+                                   HorizontalAlignment="Right"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="#FCD34D" />
+                    </Grid>
+                    <UniformGrid Columns="3" Margin="0,7,0,0">
+                        <Button x:Name="FeedButton"
+                                Style="{StaticResource PanelAction}"
+                                Content="喂食"
+                                Margin="0,0,3,0"
+                                Click="OnFeedClick" />
+                        <Button x:Name="RenameButton"
+                                Style="{StaticResource PanelAction}"
+                                Content="改名"
+                                Margin="1,0,1,0"
+                                Click="OnRenameClick" />
+                        <Button x:Name="HideButton"
+                                Style="{StaticResource PanelAction}"
+                                Content="隐藏"
+                                Margin="3,0,0,0"
+                                Click="OnHideClick" />
+                    </UniformGrid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </Grid>
+</Window>

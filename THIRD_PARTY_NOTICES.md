@@ -1,11 +1,19 @@
 # Third-Party Notices
 
+## libwebp decoder (experiment; not shipped in the npm package)
+
+`experiments/desktop-overlay/native/libwebpdecoder.dll` is the libwebp decoder
+1.6.0 (BSD-3-Clause, Copyright (c) 2010 Google Inc.), used by the optional
+desktop companion to decode WebP atlases with their alpha channel. The license
+text is at `experiments/desktop-overlay/native/LICENSE.libwebp.txt`; the
+binary is not part of the published npm tarball.
+
 The whale ornament shipped with this package (assets/decorations/whale/whale-frames.png
 plus its decoration.json) is derived from the DeepSeek wordmark in the
 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) repository
 (`website/public/wordmark.svg`), licensed under the MIT License. The derivative
 frames re-color the mark to the DeepSeek brand blue and compose a four-frame
-spout animation; no other third-party material is included.
+spout animation; no other third-party material is included in that ornament.
 
 The OUO Neko pet assets shipped with this package (`assets/ouo-neko/`: pet.json,
 spritesheet.webp and the preview GIFs) are authored by Pessimist0906 and are

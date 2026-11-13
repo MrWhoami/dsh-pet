@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -85,6 +85,204 @@ function url(path: string): string {
 }
 
 describe('pet routes', () => {
+  it('forwards the browser title map to the service', async () => {
+    const spy = vi.spyOn(service, 'setSessionTitles')
+    const response = await fetch(url('/api/pet/session-titles'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ titles: { 's-1': '标题' } }),
+    })
+    expect(response.status).toBe(200)
+    expect(spy).toHaveBeenCalledWith({ 's-1': '标题' }, true, 'legacy')
+    spy.mockRestore()
+  })
+
+  it('uses the local GUI selection for desktop polls without overriding browser selections', async () => {
+    const response = await fetch(url('/api/pet/session-titles'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ titles: { 's-1': '项目' }, current: 's-1' }),
+    })
+    expect(response.status).toBe(200)
+    const spy = vi.spyOn(service, 'state')
+    await fetch(url('/api/pet/state?desktop=1'))
+    expect(spy).toHaveBeenLastCalledWith('s-1')
+    await fetch(url('/api/pet/state?current=s-2'))
+    expect(spy).toHaveBeenLastCalledWith('s-2')
+    await fetch(url('/api/pet/session-titles'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ titles: {}, current: null }),
+    })
+    await fetch(url('/api/pet/state?desktop=1'))
+    expect(spy).toHaveBeenLastCalledWith(undefined)
+    spy.mockRestore()
+  })
+
+  it('keeps remote clients visible and prevents them from replacing the desktop selection', async () => {
+    const remoteCtx = {
+      get: () => ({ isPairedDevice: () => true }),
+    } as unknown as Context
+    const ready = vi.fn()
+    const remoteRoutes = makePetRoutes({ service, ctx: remoteCtx, overlayReady: ready })
+    const remoteServer = createServer((req, res) => {
+      // A paired request entering through the public host, rather than loopback authority.
+      req.headers.host = 'desktop.example'
+      const route = remoteRoutes.find(entry => entry.path === req.url?.split('?')[0])
+      if (route) void route.handler(req, res)
+      else { res.writeHead(404); res.end() }
+    })
+    remoteServer.listen(0, '127.0.0.1')
+    await once(remoteServer, 'listening')
+    const remoteUrl = 'http://127.0.0.1:' + (remoteServer.address() as AddressInfo).port
+    service.desktopOverlayRunningProvider = () => true
+    service.desktopSessionId = 'local'
+    try {
+      const rejected = await fetch(remoteUrl + '/api/pet/overlay/ready', { method: 'POST', body: '{}' })
+      expect(rejected.status).toBe(403)
+      expect(ready).not.toHaveBeenCalled()
+      const local = await fetch(url('/api/pet/state')).then(res => res.json())
+      expect(local.desktopOverlayRunning).toBe(true)
+      const remote = await fetch(remoteUrl + '/api/pet/state').then(res => res.json())
+      expect(remote.desktopOverlayRunning).toBeUndefined()
+      const selected = await fetch(remoteUrl + '/api/pet/state?surface=desktop').then(res => res.json())
+      expect(selected.desktopOverlayRunning).toBe(true)
+      await fetch(remoteUrl + '/api/pet/session-titles', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ titles: {}, current: 'remote' }),
+      })
+      expect(service.desktopSessionId).toBe('local')
+    } finally {
+      service.desktopOverlayRunningProvider = undefined
+      service.desktopSessionId = undefined
+      await new Promise<void>(resolve => remoteServer.close(() => resolve()))
+    }
+  })
+
+  it('calls the companion ready callback', async () => {
+    let ready = 0
+    const readyCtx = new Context()
+    const readyRoutes = makePetRoutes({ service, ctx: readyCtx, overlayReady: () => { ready++ } })
+    const readyServer = createServer((req, res) => {
+      const pathname = (req.url ?? '').split('?')[0]!
+      for (const route of readyRoutes) {
+        if (route.kind === 'exact' && pathname === route.path) {
+          void route.handler(req, res)
+          return
+        }
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    readyServer.listen(0, '127.0.0.1')
+    await once(readyServer, 'listening')
+    const readyPort = (readyServer.address() as AddressInfo).port
+    try {
+      const response = await fetch('http://127.0.0.1:' + readyPort + '/api/pet/overlay/ready', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      expect(response.status).toBe(200)
+      expect(ready).toBe(1)
+    } finally {
+      await new Promise<void>((resolve) => readyServer.close(() => resolve()))
+    }
+  })
+
+  it('orders focus ownership and rejects late snapshots from old UI instances', async () => {
+    const ownedRoutes = makePetRoutes({ service, ctx: new Context() })
+    const route = ownedRoutes.find(entry => entry.path === '/api/pet/session-titles')!
+    const ownedServer = createServer((req, res) => { void route.handler(req, res) })
+    ownedServer.listen(0, '127.0.0.1')
+    await once(ownedServer, 'listening')
+    const endpoint = 'http://127.0.0.1:' + (ownedServer.address() as AddressInfo).port
+    const send = async (source: string, revision: number, focusedAt: number, current: string) => {
+      const response = await fetch(endpoint, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ source, revision, focusedAt, current, titles: { [current]: current } }),
+      })
+      expect(response.status).toBe(200)
+    }
+    try {
+      await send('a', 10, 10, 'a')
+      await send('b', 20, 20, 'b')
+      await send('a', 30, 10, 'background-a')
+      expect(service.desktopSessionId).toBe('b')
+      await send('a', 40, 40, 'a')
+      await send('b', 25, 20, 'late-b')
+      expect(service.desktopSessionId).toBe('a')
+      await send('a', 50, 40, 'replacement')
+      await send('a', 45, 40, 'disposed-instance')
+      expect(service.desktopSessionId).toBe('replacement')
+      // A newer background update from the current owner must not defeat a focus event.
+      await send('b', 48, 48, 'focused-b')
+      expect(service.desktopSessionId).toBe('focused-b')
+      // Coalescing a focus event with a later background snapshot retains ownership.
+      await send('a', 70, 60, 'minimized-a')
+      await send('a', 60, 60, 'old-a')
+      expect(service.desktopSessionId).toBe('minimized-a')
+    } finally {
+      service.desktopSessionId = undefined
+      await new Promise<void>(resolve => ownedServer.close(() => resolve()))
+    }
+  })
+
+  it('accepts remote and legacy title updates after a local owner has left', async () => {
+    const ctx = { get: () => ({ isPairedDevice: () => true }) } as unknown as Context
+    const titleRoute = makePetRoutes({ service, ctx }).find(entry => entry.path === '/api/pet/session-titles')!
+    const titleServer = createServer((req, res) => {
+      if (req.url === '/remote') req.headers.host = 'desktop.example'
+      void titleRoute.handler(req, res)
+    })
+    titleServer.listen(0, '127.0.0.1')
+    await once(titleServer, 'listening')
+    const endpoint = 'http://127.0.0.1:' + (titleServer.address() as AddressInfo).port
+    const spy = vi.spyOn(service, 'setSessionTitles')
+    const send = async (path: string, body: unknown) => {
+      const response = await fetch(endpoint + path, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(200)
+    }
+    try {
+      await send('/local', { source: 'local', revision: 10, focusedAt: 10, current: 'local', titles: { local: 'Local' } })
+      // No more updates arrive from the local page, but its ownership record remains.
+      await send('/remote', { source: 'phone', revision: 20, focusedAt: 20, current: 'remote', titles: { remote: 'Renamed' } })
+      expect(spy).toHaveBeenLastCalledWith({ remote: 'Renamed' }, false, 'remote:phone')
+      const remoteCount = spy.mock.calls.length
+      await send('/remote', { source: 'phone', revision: 10, focusedAt: 10, titles: { remote: 'Old' } })
+      await send('/remote', { source: 'phone', revision: 20, focusedAt: 20, titles: { remote: 'Duplicate' } })
+      expect(spy).toHaveBeenCalledTimes(remoteCount)
+      expect(service.desktopSessionId).toBe('local')
+      await send('/local', { current: 'legacy', titles: { legacy: 'Legacy' } })
+      expect(spy).toHaveBeenLastCalledWith({ legacy: 'Legacy' }, true, 'legacy')
+      expect(service.desktopSessionId).toBe('local')
+      const count = spy.mock.calls.length
+      await send('/local', { source: 'local', revision: 9, focusedAt: 9, titles: { local: 'Stale' } })
+      expect(spy).toHaveBeenCalledTimes(count)
+      // The returning owner supplies a complete snapshot, including deletions.
+      await send('/local', { source: 'local', revision: 30, focusedAt: 30, titles: {} })
+      expect(spy).toHaveBeenLastCalledWith({}, false, 'local:local')
+      await send('/local', { source: 'local', revision: 40, focusedAt: 30, titles: { local: '   ' } })
+      expect(spy).toHaveBeenLastCalledWith({ local: '   ' }, false, 'local:local')
+      await send('/remote', { source: 'local', revision: 50, focusedAt: 0, release: true })
+      expect(service.desktopSessionId).toBe('local')
+      await send('/local', { source: 'local', revision: 39, focusedAt: 0, release: true })
+      expect(service.desktopSessionId).toBe('local')
+      await send('/local', { source: 'local', revision: 50, focusedAt: 0, release: true })
+      expect(service.desktopSessionId).toBeUndefined()
+      await send('/local', { source: 'local', revision: 49, focusedAt: 40, current: 'late', titles: {} })
+      expect(service.desktopSessionId).toBeUndefined()
+      await send('/local', { source: 'new', revision: 60, focusedAt: 0, current: 'new', titles: {} })
+      expect(service.desktopSessionId).toBe('new')
+    } finally {
+      spy.mockRestore()
+      service.desktopSessionId = undefined
+      await new Promise<void>(resolve => titleServer.close(() => resolve()))
+    }
+  })
+
   it('lists the registry and the selected state', async () => {
     const pets = await fetch(url('/api/pet/pets')).then(res => res.json()) as Array<{ id: string; atlasUrl: string }>
     expect(pets.map(entry => entry.id)).toEqual(['otter', 'whale-girl'])

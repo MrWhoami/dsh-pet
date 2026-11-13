@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DshPetOverlay</AssemblyName>
+    <RootNamespace>DshPetOverlay</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.0.1</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WebP + alpha: WPF's Windows WebP codec drops the alpha channel. -->
+    <None Include="native\libwebpdecoder.dll" Link="libwebpdecoder.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Bind the companion protocol to the executable it ships with: the marker
+    carries the protocol and SHA-256 of both the apphost and managed DLL. A stale
+    marker beside an older build reads as legacy instead of making the Host wait
+    for a ready signal that exe cannot send.
+  -->
+  <Target Name="WriteCompanionProtocol" AfterTargets="Build">
+    <GetFileHash Files="$(TargetDir)$(AssemblyName).exe" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="CompanionProtocolHash" />
+    </GetFileHash>
+    <GetFileHash Files="$(TargetPath)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="CompanionManagedHash" />
+    </GetFileHash>
+    <PropertyGroup>
+      <CompanionExeHash>@(CompanionProtocolHash->'%(FileHash)')</CompanionExeHash>
+      <CompanionDllHash>@(CompanionManagedHash->'%(FileHash)')</CompanionDllHash>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(TargetDir)companion.protocol" Lines='{"protocol":2,"sha256":"$(CompanionExeHash)","managedSha256":"$(CompanionDllHash)"}' Overwrite="true" />
+  </Target>
+
+  <Target Name="WriteCompanionProtocolPublish" AfterTargets="Publish">
+    <GetFileHash Files="$(PublishDir)DshPetOverlay.exe" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="CompanionPublishHash" />
+    </GetFileHash>
+    <GetFileHash Files="$(PublishDir)DshPetOverlay.dll" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="CompanionPublishManagedHash" />
+    </GetFileHash>
+    <PropertyGroup>
+      <CompanionPublishExeHash>@(CompanionPublishHash->'%(FileHash)')</CompanionPublishExeHash>
+      <CompanionPublishDllHash>@(CompanionPublishManagedHash->'%(FileHash)')</CompanionPublishDllHash>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(PublishDir)companion.protocol" Lines='{"protocol":2,"sha256":"$(CompanionPublishExeHash)","managedSha256":"$(CompanionPublishDllHash)"}' Overwrite="true" />
+  </Target>
+
+</Project>
