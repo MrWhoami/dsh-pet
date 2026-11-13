@@ -3,5 +3,5 @@
 # after editing either side, bring the other along and re-record with:
 #   git hash-object README.md README.zh.md
 # After reviewing both languages, copy the hashes below in the same order.
-README.md: 898ba26b13f48d8a87bbb32f126f7cb62663b8b3
-README.zh.md: 402aa43069f31661c9ccdb15523fe515e87df86a
+README.md: edfc776a0a2421115184972108e25bee567b72ac
+README.zh.md: e818b6f234c3b1b5d158ba47af8f1f7ffa8e96a6
